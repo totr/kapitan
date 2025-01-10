@@ -20,12 +20,13 @@ import yaml
 
 from kapitan import cached, defaults, setup_logging
 from kapitan.initialiser import initialise_skeleton
-from kapitan.inputs.jsonnet import jsonnet_file
+from kapitan.inputs.jsonnet import select_jsonnet_runtime
+from kapitan.inventory import AVAILABLE_BACKENDS, InventoryBackends
 from kapitan.lint import start_lint
 from kapitan.refs.base import RefController, Revealer
 from kapitan.refs.cmd_parser import handle_refs_command
 from kapitan.resources import generate_inventory, resource_callbacks, search_imports
-from kapitan.targets import compile_targets, schema_validate_compiled
+from kapitan.targets import compile_targets
 from kapitan.utils import check_version, from_dot_kapitan, searchvar
 from kapitan.version import DESCRIPTION, PROJECT_NAME, VERSION
 
@@ -48,7 +49,7 @@ def trigger_eval(args):
     def _search_imports(cwd, imp):
         return search_imports(cwd, imp, search_paths)
 
-    json_output = jsonnet_file(
+    json_output = select_jsonnet_runtime(
         file_path,
         import_callback=_search_imports,
         native_callbacks=resource_callbacks(search_paths),
@@ -73,34 +74,49 @@ def trigger_compile(args):
     cached.revealer_obj = Revealer(ref_controller)
 
     compile_targets(
-        args.inventory_path,
-        search_paths,
-        args.output_path,
-        args.parallelism,
-        args.targets,
-        args.labels,
-        ref_controller,
-        prune=(args.prune),
-        indent=args.indent,
-        reveal=args.reveal,
-        cache=args.cache,
-        cache_paths=args.cache_paths,
-        fetch=args.fetch,
-        force_fetch=args.force_fetch,
-        force=args.force,  # deprecated
-        validate=args.validate,
-        schemas_path=args.schemas_path,
-        jinja2_filters=args.jinja2_filters,
-        verbose=hasattr(args, "verbose") and args.verbose,
-        use_go_jsonnet=args.use_go_jsonnet,
-        compose_node_name=args.compose_node_name,
+        inventory_path=args.inventory_path,
+        search_paths=search_paths,
+        ref_controller=ref_controller,
+        args=args,
     )
 
 
 def build_parser():
     parser = argparse.ArgumentParser(prog=PROJECT_NAME, description=DESCRIPTION)
     parser.add_argument("--version", action="version", version=VERSION)
+    parser.add_argument(
+        "--mp-method",
+        action="store",
+        default=from_dot_kapitan("global", "mp-method", "spawn"),
+        help="set multiprocessing start method",
+        choices=["spawn", "fork", "forkserver"],
+    )
     subparser = parser.add_subparsers(help="commands", dest="subparser_name")
+
+    inventory_backend_parser = argparse.ArgumentParser(add_help=False)
+    inventory_backend_parser.add_argument(
+        "--inventory-backend",
+        action="store",
+        default=from_dot_kapitan("inventory_backend", "inventory-backend", InventoryBackends.RECLASS),
+        choices=AVAILABLE_BACKENDS.keys(),
+        help="Select the inventory backend to use (default=reclass)",
+    )
+    inventory_backend_parser.add_argument(
+        "--migrate",
+        action="store_true",
+        default=from_dot_kapitan("inventory_backend", "migrate", False),
+        help="Migrate your inventory to your selected inventory backend.",
+    )
+
+    inventory_backend_parser.add_argument(
+        "--compose-target-name",
+        "--compose-target-name",
+        help="Create same subfolder structure from inventory/targets inside compiled folder",
+        action="store_true",
+        default=from_dot_kapitan(
+            "global", "compose-target-name", from_dot_kapitan("compile", "compose-node-name", False)
+        ),
+    )
 
     eval_parser = subparser.add_parser("eval", aliases=["e"], help="evaluate jsonnet file")
     eval_parser.add_argument("jsonnet_file", type=str)
@@ -131,7 +147,9 @@ def build_parser():
         help='set search paths, default is ["."]',
     )
 
-    compile_parser = subparser.add_parser("compile", aliases=["c"], help="compile targets")
+    compile_parser = subparser.add_parser(
+        "compile", aliases=["c"], help="compile targets", parents=[inventory_backend_parser]
+    )
     compile_parser.set_defaults(func=trigger_compile, name="compile")
 
     compile_parser.add_argument(
@@ -206,9 +224,9 @@ def build_parser():
         "--parallelism",
         "-p",
         type=int,
-        default=from_dot_kapitan("compile", "parallelism", 4),
+        default=from_dot_kapitan("compile", "parallelism", None),
         metavar="INT",
-        help="Number of concurrent compile processes, default is 4",
+        help="Number of concurrent compile processes, default is min(len(targets), os.cpu_count())",
     )
     compile_parser.add_argument(
         "--indent",
@@ -226,7 +244,7 @@ def build_parser():
     compile_parser.add_argument(
         "--reveal",
         help="reveal refs (warning: this will potentially write sensitive data)",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=from_dot_kapitan("compile", "reveal", False),
     )
     compile_parser.add_argument(
@@ -269,17 +287,6 @@ def build_parser():
         help="use go-jsonnet",
         action="store_true",
         default=from_dot_kapitan("compile", "use-go-jsonnet", False),
-    )
-
-    # compose-node-name should be used in conjunction with reclass
-    # config "compose_node_name: true". This allows us to make the same subfolder
-    # structure in the inventory folder inside the compiled folder
-    # https://github.com/kapicorp/kapitan/issues/932
-    compile_parser.add_argument(
-        "--compose-node-name",
-        help="Create same subfolder structure from inventory/targets inside compiled folder",
-        action="store_true",
-        default=from_dot_kapitan("compile", "compose-node-name", False),
     )
 
     compile_parser.add_argument(
@@ -326,7 +333,9 @@ def build_parser():
         metavar="key=value",
     )
 
-    inventory_parser = subparser.add_parser("inventory", aliases=["i"], help="show inventory")
+    inventory_parser = subparser.add_parser(
+        "inventory", aliases=["i"], help="show inventory", parents=[inventory_backend_parser]
+    )
     inventory_parser.set_defaults(func=generate_inventory, name="inventory")
 
     inventory_parser.add_argument(
@@ -414,7 +423,9 @@ def build_parser():
     secrets_parser = subparser.add_parser("secrets", aliases=["s"], help="(DEPRECATED) please use refs")
     secrets_parser.set_defaults(func=print_deprecated_secrets_msg, name="secrets")
 
-    refs_parser = subparser.add_parser("refs", aliases=["r"], help="manage refs")
+    refs_parser = subparser.add_parser(
+        "refs", aliases=["r"], help="manage refs", parents=[inventory_backend_parser]
+    )
     refs_parser.set_defaults(func=handle_refs_command, name="refs")
 
     refs_parser.add_argument(
@@ -494,6 +505,24 @@ def build_parser():
         metavar="AUTH",
     )
     refs_parser.add_argument(
+        "--vault-mount",
+        help="set mount point for vault secrets, default is 'secret'",
+        default=from_dot_kapitan("refs", "vault-mount", "secret"),
+        metavar="MOUNT",
+    )
+    refs_parser.add_argument(
+        "--vault-path",
+        help="set path for vault secrets where the secret gets stored on vault, default is the secret_path",
+        default=from_dot_kapitan("refs", "vault-path", ""),
+        metavar="PATH",
+    )
+    refs_parser.add_argument(
+        "--vault-key",
+        help="set key for vault secrets",
+        default=from_dot_kapitan("refs", "vault-key", ""),
+        metavar="KEY",
+    )
+    refs_parser.add_argument(
         "--refs-path",
         help='set refs path, default is "./refs"',
         default=from_dot_kapitan("refs", "refs-path", "./refs"),
@@ -556,85 +585,55 @@ def build_parser():
 
     init_parser.add_argument(
         "--directory",
-        default=from_dot_kapitan("init", "directory", "."),
+        default="./",
         help="set path, in which to generate the project skeleton,"
         'assumes directory already exists. default is "./"',
     )
 
-    validate_parser = subparser.add_parser(
-        "validate",
-        aliases=["v"],
-        help="validates the compile output against schemas as specified in inventory",
+    init_parser.add_argument(
+        "--template_git_url",
+        default=from_dot_kapitan("init", "template_git_url ", defaults.COPIER_TEMPLATE_REPOSITORY),
+        help=f"Cruft template_git_url, default is {defaults.COPIER_TEMPLATE_REPOSITORY}",
     )
-    validate_parser.set_defaults(func=schema_validate_compiled, name="validate")
-
-    validate_parser.add_argument(
-        "--compiled-path",
-        default=from_dot_kapitan("compile", "compiled-path", "./compiled"),
-        help='set compiled path, default is "./compiled',
+    init_parser.add_argument(
+        "--checkout_ref",
+        default=from_dot_kapitan("init", "checkout_ref ", defaults.COPIER_TEMPLATE_REF),
+        help=f"Cruft checkout_ref, default is {defaults.COPIER_TEMPLATE_REF}",
     )
-    validate_parser.add_argument(
-        "--inventory-path",
-        default=from_dot_kapitan("compile", "inventory-path", "./inventory"),
-        help='set inventory path, default is "./inventory"',
-    )
-    validate_parser.add_argument(
-        "--targets",
-        "-t",
-        help="targets to validate, default is all",
-        type=str,
-        nargs="+",
-        default=from_dot_kapitan("compile", "targets", []),
-        metavar="TARGET",
-    ),
-    validate_parser.add_argument(
-        "--schemas-path",
-        default=from_dot_kapitan("validate", "schemas-path", "./schemas"),
-        help='set schema cache path, default is "./schemas"',
-    )
-    validate_parser.add_argument(
-        "--parallelism",
-        "-p",
-        type=int,
-        default=from_dot_kapitan("validate", "parallelism", 4),
-        metavar="INT",
-        help="Number of concurrent validate processes, default is 4",
-    )
-
     return parser
 
 
 def main():
     """main function for command line usage"""
+
+    parser = build_parser()
+    args = parser.parse_args()
+
     try:
-        multiprocessing.set_start_method("spawn")
+        multiprocessing.set_start_method(args.mp_method)
     # main() is explicitly multiple times in tests
     # and will raise RuntimeError
     except RuntimeError:
         pass
-
-    parser = build_parser()
-    args = parser.parse_args()
 
     if getattr(args, "func", None) == generate_inventory and args.pattern and args.target_name == "":
         parser.error("--pattern requires --target_name")
 
     logger.debug("Running with args: %s", args)
 
-    try:
-        cmd = sys.argv[1]
-    except IndexError:
+    if len(sys.argv) < 2:
         parser.print_help()
         sys.exit(1)
 
-    # cache args where key is subcommand
-    assert "name" in args, "All cli commands must have provided default name"
-    cached.args[args.name] = args
+    cached.args = args
 
     if hasattr(args, "verbose") and args.verbose:
-        setup_logging(level=logging.DEBUG, force=True)
+        logging_level = logging.DEBUG
     elif hasattr(args, "quiet") and args.quiet:
-        setup_logging(level=logging.CRITICAL, force=True)
+        logging_level = logging.CRITICAL
+    else:
+        logging_level = logging.INFO
+    setup_logging(level=logging_level, force=True)
 
     # call chosen command
     args.func(args)

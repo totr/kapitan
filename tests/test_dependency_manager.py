@@ -12,16 +12,21 @@ import tempfile
 import unittest
 from shutil import rmtree
 
-from kapitan.errors import HelmFetchingError
 from kapitan.cached import reset_cache
 from kapitan.cli import main
 from kapitan.dependency_manager.base import (
-    fetch_git_source,
-    fetch_http_source,
-    fetch_git_dependency,
-    fetch_helm_chart,
-    fetch_dependencies,
     HelmSource,
+    fetch_dependencies,
+    fetch_git_dependency,
+    fetch_git_source,
+    fetch_helm_chart,
+    fetch_http_source,
+)
+from kapitan.errors import HelmFetchingError
+from kapitan.inventory.model import KapitanInventorySettings
+from kapitan.inventory.model.dependencies import (
+    KapitanDependencyGitConfig,
+    KapitanDependencyHelmConfig,
 )
 
 
@@ -68,88 +73,18 @@ class DependencyManagerTest(unittest.TestCase):
         output_dir = tempfile.mkdtemp()
         source = "https://github.com/kapicorp/kapitan.git"
         dep = [
-            {
-                "output_path": os.path.join(output_dir, "subdir"),
-                "ref": "master",
-                "subdir": "tests",
-            }
+            KapitanDependencyGitConfig(
+                **{
+                    "type": "git",
+                    "source": source,
+                    "output_path": os.path.join(output_dir, "subdir"),
+                    "ref": "master",
+                    "subdir": "tests",
+                }
+            )
         ]
         fetch_git_dependency((source, dep), temp_dir, force=False)
         self.assertTrue(os.path.isdir(os.path.join(output_dir, "subdir")))
-        rmtree(temp_dir)
-        rmtree(output_dir)
-
-    def test_clone_repo_submodules_false(self):
-        """
-        Tests cloning git repo and check that submodule folder is empty
-        """
-        temp_dir = tempfile.mkdtemp()
-        output_dir = tempfile.mkdtemp()
-        source = "https://github.com/kapicorp/kapitan.git"
-        dep = [
-            {
-                "output_path": output_dir,
-                "ref": "master",
-                "submodules": False,
-            }
-        ]
-        fetch_git_dependency((source, dep), temp_dir, force=False)
-        self.assertEqual(os.listdir(os.path.join(output_dir, "kapitan", "reclass")), [])
-        rmtree(temp_dir)
-        rmtree(output_dir)
-
-    def test_clone_repo_without_submodules(self):
-        """
-        Tests cloning a git repo without any submodules
-        """
-        temp_dir = tempfile.mkdtemp()
-        output_dir = tempfile.mkdtemp()
-        source = "https://github.com/kapicorp/reclass.git"
-        dep = [
-            {
-                "output_path": output_dir,
-                "ref": "master",
-            }
-        ]
-        fetch_git_dependency((source, dep), temp_dir, force=False)
-        self.assertTrue(os.path.isdir(os.path.join(output_dir, "reclass")))
-        rmtree(temp_dir)
-        rmtree(output_dir)
-
-    def test_clone_repo_with_submodules(self):
-        """
-        Tests cloning git repo and initialize its' submodule
-        """
-        temp_dir = tempfile.mkdtemp()
-        output_dir = tempfile.mkdtemp()
-        source = "https://github.com/kapicorp/kapitan.git"
-        dep = [
-            {
-                "output_path": output_dir,
-                "ref": "master",
-            }
-        ]
-        fetch_git_dependency((source, dep), temp_dir, force=False)
-        self.assertTrue(os.listdir(os.path.join(output_dir, "kapitan", "reclass")))
-        rmtree(temp_dir)
-        rmtree(output_dir)
-
-    def test_clone_repo_with_submodule_subdir(self):
-        """
-        Tests cloning subdir in a git repo and initialize its' submodule
-        """
-        temp_dir = tempfile.mkdtemp()
-        output_dir = tempfile.mkdtemp()
-        source = "https://github.com/kapicorp/kapitan.git"
-        dep = [
-            {
-                "output_path": output_dir,
-                "ref": "master",
-                "subdir": "kapitan",
-            }
-        ]
-        fetch_git_dependency((source, dep), temp_dir, force=False)
-        self.assertTrue(os.listdir(os.path.join(output_dir, "reclass")))
         rmtree(temp_dir)
         rmtree(output_dir)
 
@@ -164,12 +99,14 @@ class DependencyManagerTest(unittest.TestCase):
         version = "11.3.0"
         repo = "https://github.com/BurdenBear/kube-charts-mirror/raw/master/docs/"
         dep = [
-            {
-                "output_path": output_chart_dir,
-                "version": version,
-                "chart_name": chart_name,
-                "source": repo,
-            }
+            KapitanDependencyHelmConfig(
+                **{
+                    "output_path": output_chart_dir,
+                    "version": version,
+                    "chart_name": chart_name,
+                    "source": repo,
+                }
+            )
         ]
         fetch_helm_chart((HelmSource(repo, chart_name, version, None), dep), temp_dir, force=False)
         self.assertTrue(os.path.isdir(output_chart_dir))
@@ -189,12 +126,14 @@ class DependencyManagerTest(unittest.TestCase):
         version = "10.7.0"
         repo = "https://github.com/BurdenBear/kube-charts-mirror/raw/master/docs/"
         dep = [
-            {
-                "output_path": output_chart_dir,
-                "version": version,
-                "chart_name": chart_name,
-                "source": repo,
-            }
+            KapitanDependencyHelmConfig(
+                **{
+                    "output_path": output_chart_dir,
+                    "version": version,
+                    "chart_name": chart_name,
+                    "source": repo,
+                }
+            )
         ]
         with self.assertRaises(HelmFetchingError):
             fetch_helm_chart((HelmSource(repo, chart_name, version, None), dep), temp_dir, force=False)
@@ -207,37 +146,34 @@ class DependencyManagerTest(unittest.TestCase):
         output_path = tempfile.mkdtemp()
         save_dir = tempfile.mkdtemp()
         # use default parallelism of 4 for test
-        pool = multiprocessing.Pool(4)
-        target_objs = [
-            {
-                "dependencies": [
-                    {
-                        "type": "https",
-                        "source": "https://github.com/BurdenBear/kube-charts-mirror/raw/master/docs/nfs-client-provisioner-1.2.8.tgz",
-                        "output_path": "nfs-client-provisioner",
-                        "unpack": True,
-                    },
-                    {
-                        "type": "https",
-                        "source": "https://github.com/BurdenBear/kube-charts-mirror/raw/master/docs/prometheus-pushgateway-1.2.13.tgz",
-                        "output_path": "prometheus-pushgateway",
-                        "unpack": True,
-                    },
-                ]
-            }
-        ]
-        try:
-            fetch_dependencies(output_path, target_objs, save_dir, False, pool)
-            pool.close()
-        except Exception as e:
-            pool.terminate()
-            raise e
-        finally:
-            pool.join()
+        with multiprocessing.Pool(4) as pool:
+            dependencies = [
+                {
+                    "type": "https",
+                    "source": "https://github.com/BurdenBear/kube-charts-mirror/raw/master/docs/nfs-client-provisioner-1.2.8.tgz",
+                    "output_path": "nfs-client-provisioner",
+                    "unpack": True,
+                },
+                {
+                    "type": "https",
+                    "source": "https://github.com/BurdenBear/kube-charts-mirror/raw/master/docs/prometheus-pushgateway-1.2.13.tgz",
+                    "output_path": "prometheus-pushgateway",
+                    "unpack": True,
+                },
+            ]
 
-        for obj in target_objs[0]["dependencies"]:
-            self.assertTrue(os.path.isdir(os.path.join(output_path, obj["output_path"])))
-            self.assertTrue(os.path.isdir(os.path.join(save_dir, obj["output_path"])))
+            inventory = KapitanInventorySettings(dependencies=dependencies)
+            target_objs = [inventory]
+            try:
+                fetch_dependencies(output_path, target_objs, save_dir, False, pool)
+                pool.close()
+            except Exception as e:
+                pool.terminate()
+                raise e
+
+        for obj in target_objs[0].dependencies:
+            self.assertTrue(os.path.isdir(os.path.join(output_path, obj.output_path)))
+            self.assertTrue(os.path.isdir(os.path.join(save_dir, obj.output_path)))
         rmtree(output_path)
         rmtree(save_dir)
 

@@ -7,21 +7,22 @@ import logging
 import multiprocessing
 import os
 from collections import defaultdict, namedtuple
-from distutils.dir_util import copy_tree
 from functools import partial
 from mimetypes import MimeTypes
 from shutil import copyfile, rmtree
 
-from git import GitCommandError
-from git import Repo
-from kapitan.errors import GitSubdirNotFoundError, GitFetchingError, HelmFetchingError
+from git import GitCommandError, Repo
+
+from kapitan.errors import GitFetchingError, GitSubdirNotFoundError, HelmFetchingError
 from kapitan.helm_cli import helm_cli
+from kapitan.inventory.model.dependencies import KapitanDependencyTypes
 from kapitan.utils import (
+    copy_tree,
     make_request,
-    unpack_downloaded_file,
-    safe_copy_tree,
-    safe_copy_file,
     normalise_join_path,
+    safe_copy_file,
+    safe_copy_tree,
+    unpack_downloaded_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,16 +47,16 @@ def fetch_dependencies(output_path, target_objs, save_dir, force, pool):
     deps_output_paths = defaultdict(set)
     for target_obj in target_objs:
         try:
-            dependencies = target_obj["dependencies"]
+            dependencies = target_obj.dependencies
             for item in dependencies:
-                dependency_type = item["type"]
-                source_uri = item["source"]
+                dependency_type = item.type
+                source_uri = item.source
 
                 # The target key "output_path" is relative to the compile output path set by the user
                 # point to the full output path
-                full_output_path = normalise_join_path(output_path, item["output_path"])
-                logger.debug("Updated output_path from %s to %s", item["output_path"], output_path)
-                item["output_path"] = full_output_path
+                full_output_path = normalise_join_path(output_path, item.output_path)
+                logger.debug("Updated output_path from %s to %s", item.output_path, output_path)
+                item.output_path = full_output_path
 
                 if full_output_path in deps_output_paths[source_uri]:
                     # if the output_path is duplicated for the same source_uri
@@ -64,15 +65,13 @@ def fetch_dependencies(output_path, target_objs, save_dir, force, pool):
                 else:
                     deps_output_paths[source_uri].add(full_output_path)
 
-                if dependency_type == "git":
+                if dependency_type == KapitanDependencyTypes.GIT:
                     git_deps[source_uri].append(item)
-                elif dependency_type in ("http", "https"):
+                elif dependency_type in (KapitanDependencyTypes.HTTP, KapitanDependencyTypes.HTTPS):
                     http_deps[source_uri].append(item)
-                elif dependency_type == "helm":
-                    version = item.get("version", "")
-                    helm_deps[
-                        HelmSource(source_uri, item["chart_name"], version, item.get("helm_path"))
-                    ].append(item)
+                elif dependency_type == KapitanDependencyTypes.HELM:
+                    version = item.version
+                    helm_deps[HelmSource(source_uri, item.chart_name, version, item.helm_path)].append(item)
                 else:
                     logger.warning("%s is not a valid source type", dependency_type)
 
@@ -106,21 +105,17 @@ def fetch_git_dependency(dep_mapping, save_dir, force, item_type="Dependency"):
         logger.debug("Using cached %s %s", item_type, cached_repo_path)
     for dep in deps:
         repo = Repo(cached_repo_path)
-        output_path = dep["output_path"]
+        output_path = dep.output_path
         copy_src_path = cached_repo_path
-        if "ref" in dep:
-            ref = dep["ref"]
-            repo.git.checkout(ref)
-        else:
-            repo.git.checkout("master")  # default ref
+        repo.git.checkout(dep.ref)
 
         # initialising submodules
-        if "submodules" not in dep or dep["submodules"]:
+        if dep.submodules:
             for submodule in repo.submodules:
                 submodule.update(init=True)
 
-        if "subdir" in dep:
-            sub_dir = dep["subdir"]
+        if dep.subdir:
+            sub_dir = dep.subdir
             full_subdir = os.path.join(cached_repo_path, sub_dir)
             if os.path.isdir(full_subdir):
                 copy_src_path = full_subdir
@@ -129,7 +124,9 @@ def fetch_git_dependency(dep_mapping, save_dir, force, item_type="Dependency"):
                     "{} {}: subdir {} not found in repo".format(item_type, source, sub_dir)
                 )
         if force:
-            copied = copy_tree(copy_src_path, output_path, verbose=0)
+            # We need `clobber_files=True` here, since we otherwise can't overwrite read-only Git
+            # index and pack files if the destination already contains a copy of the Git repo.
+            copied = copy_tree(copy_src_path, output_path, clobber_files=True)
         else:
             copied = safe_copy_tree(copy_src_path, output_path)
         if copied:
@@ -167,8 +164,8 @@ def fetch_http_dependency(dep_mapping, save_dir, force, item_type="Dependency"):
         logger.debug("Using cached %s %s", item_type, cached_source_path)
         content_type = MimeTypes().guess_type(cached_source_path)[0]
     for dep in deps:
-        output_path = dep["output_path"]
-        if dep.get("unpack", False):
+        output_path = dep.output_path
+        if dep.unpack:
             # ensure that the directory we are extracting to exists
             os.makedirs(output_path, exist_ok=True)
             if force:
@@ -232,25 +229,29 @@ def fetch_helm_chart(dep_mapping, save_dir, force):
     cached_repo_path = os.path.join(
         save_dir, path_hash, source.chart_name + "-" + (source.version or "latest")
     )
-    if force or not exists_in_cache(cached_repo_path):
-        fetch_helm_archive(source.helm_path, source.repo, source.chart_name, source.version, cached_repo_path)
-    else:
-        logger.debug("Using cached helm chart at %s", cached_repo_path)
 
     for dep in deps:
-        output_path = dep["output_path"]
+        output_path = dep.output_path
 
-        parent_dir = os.path.dirname(output_path)
-        if parent_dir != "":
-            os.makedirs(parent_dir, exist_ok=True)
+        if not os.path.exists(output_path) or force:
+            if not exists_in_cache(cached_repo_path):
+                fetch_helm_archive(
+                    source.helm_path, source.repo, source.chart_name, source.version, cached_repo_path
+                )
+            else:
+                logger.debug("Using cached helm chart at %s", cached_repo_path)
 
-        if force:
-            copied = copy_tree(cached_repo_path, output_path, verbose=0)
-        else:
-            copied = safe_copy_tree(cached_repo_path, output_path)
+            parent_dir = os.path.dirname(output_path)
+            if parent_dir != "":
+                os.makedirs(parent_dir, exist_ok=True)
 
-        if copied:
-            logger.info("Dependency %s: saved to %s", source.chart_name, output_path)
+            if force:
+                copied = copy_tree(cached_repo_path, output_path)
+            else:
+                copied = safe_copy_tree(cached_repo_path, output_path)
+
+            if copied:
+                logger.info("Dependency %s: saved to %s", source.chart_name, output_path)
 
 
 def fetch_helm_archive(helm_path, repo, chart_name, version, save_path):

@@ -1,6 +1,0 @@
-FROM squidfunk/mkdocs-material:8.5.10
-
-COPY requirements.docs.txt /tmp/requirements.docs.txt
-
-RUN apk update && \
-    pip install -r /tmp/requirements.docs.txt

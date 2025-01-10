@@ -6,14 +6,16 @@
 "gkms secrets module"
 
 import base64
-import googleapiclient.discovery as gcloud
 import logging
 import warnings
 
-from kapitan.refs.base64 import Base64Ref, Base64RefBackend
-from kapitan.refs.base import RefError
+import googleapiclient.discovery as gcloud
+
 from kapitan import cached
 from kapitan.errors import KapitanError
+from kapitan.refs import KapitanReferencesTypes
+from kapitan.refs.base import RefError
+from kapitan.refs.base64 import Base64Ref, Base64RefBackend
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +25,6 @@ warnings.filterwarnings("ignore", "Your application has authenticated using end 
 
 class GoogleKMSError(KapitanError):
     """Generic Google KMS errors"""
-
-    pass
 
 
 def gkms_obj():
@@ -52,7 +52,7 @@ class GoogleKMSSecret(Base64Ref):
             self.data = data
             self.key = key
         super().__init__(self.data, **kwargs)
-        self.type_name = "gkms"
+        self.type_name = KapitanReferencesTypes.GKMS
 
     @classmethod
     def from_params(cls, data, ref_params):
@@ -65,11 +65,9 @@ class GoogleKMSSecret(Base64Ref):
             if target_name is None:
                 raise ValueError("target_name not set")
 
-            target_inv = cached.inv["nodes"].get(target_name, None)
-            if target_inv is None:
-                raise ValueError("target_inv not set")
+            target_inv = cached.inv.get_parameters(target_name)
 
-            key = target_inv["parameters"]["kapitan"]["secrets"]["gkms"]["key"]
+            key = target_inv.kapitan.secrets.gkms.key
             return cls(data, key, **ref_params.kwargs)
         except KeyError:
             raise RefError("Could not create GoogleKMSSecret: target_name missing")
@@ -166,4 +164,4 @@ class GoogleKMSBackend(Base64RefBackend):
     def __init__(self, path, ref_type=GoogleKMSSecret, **ref_kwargs):
         "init GoogleKMSBackend ref backend type"
         super().__init__(path, ref_type, **ref_kwargs)
-        self.type_name = "gkms"
+        self.type_name = KapitanReferencesTypes.GKMS

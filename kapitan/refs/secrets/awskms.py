@@ -6,18 +6,18 @@
 "awskms secrets module"
 
 import base64
+
 import boto3
 
-from kapitan.refs.base import RefError
-from kapitan.refs.base64 import Base64Ref, Base64RefBackend
 from kapitan import cached
 from kapitan.errors import KapitanError
+from kapitan.refs import KapitanReferencesTypes
+from kapitan.refs.base import RefError
+from kapitan.refs.base64 import Base64Ref, Base64RefBackend
 
 
 class AWSKMSError(KapitanError):
     """Generic AWS KMS errors"""
-
-    pass
 
 
 def awskms_obj():
@@ -41,7 +41,7 @@ class AWSKMSSecret(Base64Ref):
             self.data = data
             self.key = key
         super().__init__(self.data, **kwargs)
-        self.type_name = "awskms"
+        self.type_name = KapitanReferencesTypes.AWSKMS
 
     @classmethod
     def from_params(cls, data, ref_params):
@@ -54,11 +54,11 @@ class AWSKMSSecret(Base64Ref):
             if target_name is None:
                 raise ValueError("target_name not set")
 
-            target_inv = cached.inv["nodes"].get(target_name, None)
+            target_inv = cached.inv.get_parameters(target_name)
             if target_inv is None:
                 raise ValueError("target_inv not set")
 
-            key = target_inv["parameters"]["kapitan"]["secrets"]["awskms"]["key"]
+            key = target_inv.kapitan.secrets.awskms.key
             return cls(data, key, **ref_params.kwargs)
         except KeyError:
             raise RefError("Could not create AWSKMSSecret: target_name missing")

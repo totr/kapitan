@@ -18,14 +18,25 @@ from functools import lru_cache
 
 import yaml
 
-from kapitan.errors import RefBackendError, RefError, RefFromFuncError, RefHashMismatchError
+from kapitan.errors import (
+    RefBackendError,
+    RefError,
+    RefFromFuncError,
+    RefHashMismatchError,
+)
+from kapitan.refs import KapitanReferencesTypes
 from kapitan.refs.functions import eval_func, get_func_lookup
-from kapitan.utils import PrettyDumper, list_all_paths
+from kapitan.utils import PrettyDumper, StrEnum, list_all_paths
 
 try:
     from yaml import CSafeLoader as YamlLoader
 except ImportError:
     from yaml import SafeLoader as YamlLoader
+
+yaml.SafeDumper.add_multi_representer(
+    StrEnum,
+    yaml.representer.SafeRepresenter.represent_str,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +51,7 @@ class PlainRef(object):
         """
         writes plain data
         """
-        self.type_name = "plain"
+        self.type_name = KapitanReferencesTypes.PLAIN
         self.encoding = kwargs.get("encoding", "original")
         self.embedded_subvar_path = kwargs.get("embedded_subvar_path", None)
         self.data = data
@@ -449,7 +460,7 @@ class RefController(object):
     def register_backend(self, backend):
         "register backend type"
         assert isinstance(backend, PlainRefBackend)
-        self.backends[backend.type_name] = backend
+        self.backends[str(backend.type_name)] = backend
 
     def _get_backend(self, type_name):
         "imports and registers backend according to type_name"
@@ -457,43 +468,43 @@ class RefController(object):
             return self.backends[type_name]
         except KeyError:
             ref_kwargs = {"embed_refs": self.embed_refs}
-            if type_name == "plain":
+            if type_name == KapitanReferencesTypes.PLAIN:
                 from kapitan.refs.base import PlainRefBackend
 
                 # XXX embed_refs in plain backend does nothing
                 self.register_backend(PlainRefBackend(self.path, **ref_kwargs))
 
-            elif type_name == "env":
+            elif type_name == KapitanReferencesTypes.ENV:
                 from kapitan.refs.env import EnvRefBackend
 
                 # embed_refs in env backend also does nothing
                 self.register_backend(EnvRefBackend(self.path, **ref_kwargs))
 
-            elif type_name == "base64":
+            elif type_name == KapitanReferencesTypes.BASE64:
                 from kapitan.refs.base64 import Base64RefBackend
 
                 self.register_backend(Base64RefBackend(self.path, **ref_kwargs))
-            elif type_name == "gpg":
+            elif type_name == KapitanReferencesTypes.GPG:
                 from kapitan.refs.secrets.gpg import GPGBackend
 
                 self.register_backend(GPGBackend(self.path, **ref_kwargs))
-            elif type_name == "gkms":
+            elif type_name == KapitanReferencesTypes.GKMS:
                 from kapitan.refs.secrets.gkms import GoogleKMSBackend
 
                 self.register_backend(GoogleKMSBackend(self.path, **ref_kwargs))
-            elif type_name == "awskms":
+            elif type_name == KapitanReferencesTypes.AWSKMS:
                 from kapitan.refs.secrets.awskms import AWSKMSBackend
 
                 self.register_backend(AWSKMSBackend(self.path, **ref_kwargs))
-            elif type_name == "vaultkv":
+            elif type_name == KapitanReferencesTypes.VAULTKV:
                 from kapitan.refs.secrets.vaultkv import VaultBackend
 
                 self.register_backend(VaultBackend(self.path, **ref_kwargs))
-            elif type_name == "vaulttransit":
+            elif type_name == KapitanReferencesTypes.VAULTTRANSIT:
                 from kapitan.refs.secrets.vaulttransit import VaultBackend
 
                 self.register_backend(VaultBackend(self.path, **ref_kwargs))
-            elif type_name == "azkms":
+            elif type_name == KapitanReferencesTypes.AZKMS:
                 from kapitan.refs.secrets.azkms import AzureKMSBackend
 
                 self.register_backend(AzureKMSBackend(self.path, **ref_kwargs))
@@ -598,13 +609,28 @@ class RefController(object):
                             token, ref.token
                         )
                     )
+
+        # "type_name:path/to/ref:vault_mount:path/in/vault:key"
+        elif len(attrs) == 5:
+            type_name = attrs[0]
+            path_to_ref = attrs[1]
+            key = attrs[4]
+
+            if key is None:
+                raise RefError(f"{token} is not a valid token (key in vault is needed)")
+            else:
+                backend = self._get_backend(type_name)
+                ref = backend[path_to_ref]
+                return ref
         else:
             return None
 
     def _set_to_token(self, token, ref_obj):
         attrs = token.split(":")
 
-        if len(attrs) == 2:
+        # 2: default ref tag
+        # 5: used for writing(creating) secrets in vaultkv
+        if len(attrs) in (2, 5):
             type_name = attrs[0]
             path = attrs[1]
             backend = self._get_backend(type_name)
@@ -684,6 +710,9 @@ class RefController(object):
                 ctx.encode_base64 = False
                 ctx.ref_controller = self
                 ctx.token = token
+
+                # pass the token as ref param
+                value.kwargs["token"] = token
 
                 self._eval_func_str(ctx, func_str)
                 ref_type = self.token_type(token)
