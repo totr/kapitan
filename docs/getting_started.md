@@ -1,6 +1,6 @@
 # :kapitan-logo: **Kapitan Overview**
 
-## Setup your installation 
+## Setup your installation
 
 Using our reference repositories you can easily get started with **Kapitan**
 
@@ -70,6 +70,7 @@ Compiled echo-server (0.14s)
 ## Other installation methods
 
 ### Docker
+
 [![Releases](https://img.shields.io/github/release/kapicorp/kapitan.svg)](https://github.com/kapicorp/kapitan/releases)
 
 !!! success "recommended"
@@ -93,7 +94,7 @@ Compiled echo-server (0.14s)
         kapitan -h
         ```
 
-### Pip 
+### Pip
 
 #### Install Python
 

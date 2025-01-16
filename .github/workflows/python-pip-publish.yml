@@ -1,7 +1,12 @@
 ---
 name: Upload Python Package
 
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}'
+  cancel-in-progress: true
+
 on:
+  workflow_dispatch:
   release:
     types: [created]
 
@@ -9,11 +14,11 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
           python-version: 3.x
       - name: Install dependencies
@@ -27,12 +32,6 @@ jobs:
         run: |-
           python -m build
           twine check dist/*
-      - name: Test package upload
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TEST_TOKEN }}
-        run: |-
-          twine upload --repository testpypi dist/*
       - name: Package upload
         env:
           TWINE_USERNAME: __token__

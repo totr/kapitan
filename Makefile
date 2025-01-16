@@ -1,9 +1,26 @@
 all: clean package
 
+.PHONY: pre-requisites
+pre-requisites:
+	@echo ----- Installing pre-requisites -----
+	poetry install --with dev --with docs --with test
+
+.PHONY: lint
+lint:
+	@echo ----- Running lint -----
+	poetry run flake8 kapitan
+	poetry run mypy kapitan
+	poetry run pylint kapitan
+
+.PHONY: install poetry with pipx
+install_poetry:
+	@echo ----- Installing poetry with pipx -----
+	which poetry || pipx install poetry
+
 .PHONY: test
-test:
+test: pre-requisites lint test_python test_docker test_coverage test_formatting
 	@echo ----- Running python tests -----
-	python3 -m unittest discover
+	poetry run pytest
 
 .PHONY: test_docker
 test_docker:
@@ -16,13 +33,13 @@ test_docker:
 .PHONY: test_coverage
 test_coverage:
 	@echo ----- Testing code coverage -----
-	coverage run --source=kapitan --omit="*reclass*" -m unittest discover
-	coverage report --fail-under=65 -m
+	poetry run coverage run --source=kapitan -m pytest
+	poetry run coverage report --fail-under=65 -m
 
 .PHONY: test_formatting
 test_formatting:
 	@echo ----- Testing code formatting -----
-	black --check .
+	poetry run black --check .
 	@echo
 
 .PHONY: release
@@ -43,17 +60,13 @@ clean:
 
 .PHONY: format_codestyle
 format_codestyle:
-	which black || echo "Install black with pip3 install --user black"
-	# ignores line length and reclass
-	black .
+	poetry run black .
 	@echo
 
 .PHONY: local_serve_documentation
 local_serve_documentation:
-	docker build -f Dockerfile.docs --no-cache -t kapitan-docs .
-	docker run --rm -v $(PWD):/docs -p 8000:8000 kapitan-docs
+	poetry run mike serve
 
 .PHONY: mkdocs_gh_deploy
-mkdocs_gh_deploy: # to run locally assuming git ssh access
-	docker build -f Dockerfile.docs --no-cache -t kapitan-docs .
-	docker run --rm -it -v $(PWD):/src -v ~/.ssh:/root/.ssh -w /src kapitan-docs gh-deploy -f ./mkdocs.yml
+mkdocs_gh_deploy:
+	poetry run mike deploy --push dev master

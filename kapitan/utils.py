@@ -7,35 +7,43 @@
 from __future__ import print_function
 
 import collections
+import functools
+import glob
 import json
 import logging
-import magic
 import math
 import os
 import re
+import shutil
 import stat
 import sys
 import tarfile
-import traceback
 from collections import Counter, defaultdict
-from distutils.dir_util import mkpath
-from distutils.errors import DistutilsFileError
-from distutils.file_util import _copy_file_contents
-from functools import lru_cache, wraps
+from functools import lru_cache
 from hashlib import sha256
 from zipfile import ZipFile
 
 import jinja2
+import magic
 import requests
 import yaml
 
 from kapitan import cached, defaults
 from kapitan.errors import CompileError
-from kapitan.inputs.jinja2_filters import load_jinja2_filters, load_jinja2_filters_from_file
+from kapitan.jinja2_filters import (
+    _jinja_error_info,
+    load_jinja2_filters,
+    load_jinja2_filters_from_file,
+)
 from kapitan.version import VERSION
 
 logger = logging.getLogger(__name__)
 
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from strenum import StrEnum
 
 try:
     from yaml import CSafeLoader as YamlLoader
@@ -47,38 +55,6 @@ def fatal_error(message):
     "Logs error message, sys.exit(1)"
     logger.error(message)
     sys.exit(1)
-
-
-def hashable_lru_cache(func):
-    """Usable instead of lru_cache for functions using unhashable objects"""
-
-    cache = lru_cache(maxsize=256)
-
-    def deserialise(value):
-        try:
-            return json.loads(value)
-        except Exception:
-            logger.debug("hashable_lru_cache: %s not serialiseable, using generic lru_cache instead", value)
-            return value
-
-    def func_with_serialized_params(*args, **kwargs):
-        _args = tuple([deserialise(arg) for arg in args])
-        _kwargs = {k: deserialise(v) for k, v in kwargs.items()}
-        return func(*_args, **_kwargs)
-
-    cached_function = cache(func_with_serialized_params)
-
-    @wraps(func)
-    def lru_decorator(*args, **kwargs):
-        _args = tuple([json.dumps(arg, sort_keys=True) if type(arg) in (list, dict) else arg for arg in args])
-        _kwargs = {
-            k: json.dumps(v, sort_keys=True) if type(v) in (list, dict) else v for k, v in kwargs.items()
-        }
-        return cached_function(*_args, **_kwargs)
-
-    lru_decorator.cache_info = cached_function.cache_info
-    lru_decorator.cache_clear = cached_function.cache_clear
-    return lru_decorator
 
 
 class termcolor:
@@ -110,81 +86,6 @@ def sha256_string(string):
     return sha256(string.encode("UTF-8")).hexdigest()
 
 
-def _jinja_error_info(trace_data):
-    """Extract jinja2 templating related frames from traceback data"""
-    try:
-        return [x for x in trace_data if x[2] in ("top-level template code", "template", "<module>")][-1]
-    except IndexError:
-        pass
-
-
-def render_jinja2_file(name, context, jinja2_filters=defaults.DEFAULT_JINJA2_FILTERS_PATH, search_paths=None):
-    """Render jinja2 file name with context"""
-    path, filename = os.path.split(name)
-    search_paths = [path or "./"] + (search_paths or [])
-    env = jinja2.Environment(
-        undefined=jinja2.StrictUndefined,
-        loader=jinja2.FileSystemLoader(search_paths),
-        trim_blocks=True,
-        lstrip_blocks=True,
-        extensions=["jinja2.ext.do"],
-    )
-    load_jinja2_filters(env)
-    load_jinja2_filters_from_file(env, jinja2_filters)
-    try:
-        return env.get_template(filename).render(context)
-    except jinja2.TemplateError as e:
-        # Exception misses the line number info. Retreive it from traceback
-        err_info = _jinja_error_info(traceback.extract_tb(sys.exc_info()[2]))
-        raise CompileError(f"Jinja2 TemplateError: {e}, at {err_info[0]}:{err_info[1]}")
-
-
-def render_jinja2(path, context, jinja2_filters=defaults.DEFAULT_JINJA2_FILTERS_PATH, search_paths=None):
-    """
-    Render files in path with context
-    Returns a dict where the is key is the filename (with subpath)
-    and value is a dict with content and mode
-    Empty paths will not be rendered
-    Path can be a single file or directory
-    Ignores hidden files (.filename)
-    """
-    rendered = {}
-    walk_root_files = []
-    if os.path.isfile(path):
-        dirname = os.path.dirname(path)
-        basename = os.path.basename(path)
-        walk_root_files = [(dirname, None, [basename])]
-    else:
-        walk_root_files = os.walk(path)
-
-    for root, _, files in walk_root_files:
-        for f in files:
-            if f.startswith("."):
-                logger.debug("render_jinja2: ignoring file %s", f)
-                continue
-            render_path = os.path.join(root, f)
-            logger.debug("render_jinja2 rendering %s", render_path)
-            # get subpath and filename, strip any leading/trailing /
-            name = render_path[len(os.path.commonprefix([root, path])) :].strip("/")
-            try:
-                rendered[name] = {
-                    "content": render_jinja2_file(
-                        render_path, context, jinja2_filters=jinja2_filters, search_paths=search_paths
-                    ),
-                    "mode": file_mode(render_path),
-                }
-            except Exception as e:
-                raise CompileError(f"Jinja2 error: failed to render {render_path}: {e}")
-
-    return rendered
-
-
-def file_mode(name):
-    """Returns mode for file name"""
-    st = os.stat(name)
-    return stat.S_IMODE(st.st_mode)
-
-
 def prune_empty(d):
     """
     Remove empty lists and empty dictionaries from d
@@ -212,45 +113,34 @@ class PrettyDumper(yaml.SafeDumper):
     def increase_indent(self, flow=False, indentless=False):
         return super(PrettyDumper, self).increase_indent(flow, False)
 
+    @classmethod
+    def get_dumper_for_style(cls, style_selection="double-quotes"):
+        cls.add_representer(str, functools.partial(multiline_str_presenter, style_selection=style_selection))
+        return cls
 
-def multiline_str_presenter(dumper, data):
+
+def multiline_str_presenter(dumper, data, style_selection="double-quotes"):
     """
     Configures yaml for dumping multiline strings with given style.
     By default, strings are getting dumped with style='"'.
     Ref: https://github.com/yaml/pyyaml/issues/240#issuecomment-1018712495
     """
-    # get parsed args from cached.py
-    compile_args = cached.args.get("compile", None)
-    style = None
-    if compile_args:
-        style = compile_args.yaml_multiline_string_style
 
-    # check for inventory args too
-    inventory_args = cached.args.get("inventory", None)
-    if inventory_args:
-        style = inventory_args.multiline_string_style
+    supported_styles = {"literal": "|", "folded": ">", "double-quotes": '"'}
 
-    if style == "literal":
-        style = "|"
-    elif style == "folded":
-        style = ">"
-    else:
-        style = '"'
+    style = supported_styles.get(style_selection)
+
     if data.count("\n") > 0:  # check for multiline string
         return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
     return dumper.represent_scalar("tag:yaml.org,2002:str", data)
 
 
-PrettyDumper.add_representer(str, multiline_str_presenter)
-
-
 def null_presenter(dumper, data):
     """Configures yaml for omitting value from null-datatype"""
     # get parsed args from cached.py
-    compile_args = cached.args.get("compile", None)
-    flag_value = None
-    if compile_args:
-        flag_value = compile_args.yaml_dump_null_as_empty
+    flag_value = False
+    if hasattr(cached.args, "yaml_dump_null_as_empty"):
+        flag_value = cached.args.yaml_dump_null_as_empty
 
     if flag_value:
         return dumper.represent_scalar("tag:yaml.org,2002:null", "")
@@ -273,7 +163,6 @@ def flatten_dict(d, parent_key="", sep="."):
     return dict(items)
 
 
-@hashable_lru_cache
 def deep_get(dictionary, keys, previousKey=None):
     """Search recursively for 'keys' in 'dictionary' and return value, otherwise return None"""
     value = None
@@ -410,19 +299,15 @@ def dot_kapitan_config():
 
 def from_dot_kapitan(command, flag, default):
     """
-    Returns the 'flag' for 'command' from .kapitan file. If failed, returns 'default'
+    Returns the 'flag' from the '<command>' or from the 'global' section in the  .kapitan file. If
+    neither section proivdes a value for the flag, the value passed in `default` is returned.
     """
     kapitan_config = dot_kapitan_config()
 
-    try:
-        if kapitan_config[command]:
-            flag_value = kapitan_config[command][flag]
-            if flag_value:
-                return flag_value
-    except KeyError:
-        pass
+    global_config = kapitan_config.get("global", {})
+    cmd_config = kapitan_config.get(command, {})
 
-    return default
+    return cmd_config.get(flag, global_config.get(flag, default))
 
 
 def compare_versions(v1_raw, v2_raw):
@@ -568,19 +453,23 @@ def unpack_downloaded_file(file_path, output_path, content_type):
     return is_unpacked
 
 
+class SafeCopyError(Exception):
+    """Raised when a file or directory cannot be safely copied."""
+
+
 def safe_copy_file(src, dst):
     """Copy a file from 'src' to 'dst'.
 
-    Similar to distutils.file_util.copy_file except
+    Similar to shutil.copyfile except
     if the file exists in 'dst' it's not clobbered
     or overwritten.
 
-    returns a tupple (src, val)
+    returns a tuple (src, val)
     file not copied if val = 0 else 1
     """
 
     if not os.path.isfile(src):
-        raise DistutilsFileError("Can't copy {}: doesn't exist or is not a regular file".format(src))
+        raise SafeCopyError("Can't copy {}: doesn't exist or is not a regular file".format(src))
 
     if os.path.isdir(dst):
         dir = dst
@@ -591,7 +480,7 @@ def safe_copy_file(src, dst):
     if os.path.isfile(dst):
         logger.debug("Not updating %s (file already exists)", dst)
         return (dst, 0)
-    _copy_file_contents(src, dst)
+    shutil.copyfile(src, dst)
     logger.debug("Copied %s to %s", src, dir)
     return (dst, 1)
 
@@ -599,21 +488,23 @@ def safe_copy_file(src, dst):
 def safe_copy_tree(src, dst):
     """Recursively copies the 'src' directory tree to 'dst'
 
-    Both 'src' and 'dst' must be directories.
-    similar to distutil.dir_util.copy_tree except
-    it doesn't overwite an existing file and doesn't
-    copy any file starting with "."
+    Both 'src' and 'dst' must be directories. Similar to copy_tree except
+    it doesn't overwite an existing file and doesn't copy any file starting
+    with "."
 
     Returns a list of copied file paths.
     """
     if not os.path.isdir(src):
-        raise DistutilsFileError("Cannot copy tree {}: not a directory".format(src))
+        raise SafeCopyError("Cannot copy tree {}: not a directory".format(src))
     try:
         names = os.listdir(src)
     except OSError as e:
-        raise DistutilsFileError("Error listing files in {}: {}".format(src, e.strerror))
+        raise SafeCopyError("Error listing files in {}: {}".format(src, e.strerror))
 
-    mkpath(dst)
+    try:
+        os.makedirs(dst, exist_ok=True)
+    except FileExistsError:
+        pass
     outputs = []
 
     for name in names:
@@ -632,3 +523,112 @@ def safe_copy_tree(src, dst):
                 outputs.append(dst_name)
 
     return outputs
+
+
+def force_copy_file(src: str, dst: str, *args, **kwargs):
+    """Copy file from `src` to `dst`, forcibly replacing `dst` if it's a file, but preserving the
+    source file's metadata.
+
+    This is suitable to use as `copy_function` in `shutil.copytree()` if the behavior of distutils'
+    `copy_tree` should be mimicked as closely as possible.
+    """
+    if os.path.isfile(dst):
+        os.unlink(dst)
+    shutil.copy2(src, dst, *args, **kwargs)
+
+
+def copy_tree(src: str, dst: str, clobber_files=False) -> list:
+    """Recursively copy a given directory from `src` to `dst`.
+
+    If `dst` or a parent of `dst` doesn't exist, the missing directories are created.
+
+    If `clobber_files` is set to true, existing files in the destination directory are completely
+    clobbered. This is necessary to allow use of this function when copying a Git repo into a
+    destination directory which may already contain an old copy of the repo. Files that are
+    overwritten this way won't be listed in the return value.
+
+    Returns a list of the copied files.
+    """
+    if not os.path.isdir(src):
+        raise SafeCopyError(f"Cannot copy tree {src}: not a directory")
+
+    if os.path.exists(dst) and not os.path.isdir(dst):
+        raise SafeCopyError(f"Cannot copy tree to {dst}: destination exists but not a directory")
+
+    # this will generate an empty set if `dst` doesn't exist
+    before = set(glob.iglob(f"{dst}/*", recursive=True))
+    if clobber_files:
+        # use `force_copy_file` to more closely mimic distutils' `copy_tree` behavior
+        copy_function = force_copy_file
+    else:
+        copy_function = shutil.copy2
+    shutil.copytree(src, dst, dirs_exist_ok=True, copy_function=copy_function)
+    after = set(glob.iglob(f"{dst}/*", recursive=True))
+    return list(after - before)
+
+
+def render_jinja2_file(name, context, jinja2_filters=defaults.DEFAULT_JINJA2_FILTERS_PATH, search_paths=None):
+    """Render jinja2 file name with context"""
+    path, filename = os.path.split(name)
+    search_paths = [path or "./"] + (search_paths or [])
+    env = jinja2.Environment(
+        undefined=jinja2.StrictUndefined,
+        loader=jinja2.FileSystemLoader(search_paths),
+        trim_blocks=True,
+        lstrip_blocks=True,
+        extensions=["jinja2.ext.do"],
+    )
+    load_jinja2_filters(env)
+    load_jinja2_filters_from_file(env, jinja2_filters)
+    try:
+        return env.get_template(filename).render(context)
+    except jinja2.TemplateError as e:
+        # Exception misses the line number info. Retreive it from traceback
+        err_info = _jinja_error_info(traceback.extract_tb(sys.exc_info()[2]))
+        raise CompileError(f"Jinja2 TemplateError: {e}, at {err_info[0]}:{err_info[1]}")
+
+
+def render_jinja2(path, context, jinja2_filters=defaults.DEFAULT_JINJA2_FILTERS_PATH, search_paths=None):
+    """
+    Render files in path with context
+    Returns a dict where the is key is the filename (with subpath)
+    and value is a dict with content and mode
+    Empty paths will not be rendered
+    Path can be a single file or directory
+    Ignores hidden files (.filename)
+    """
+    rendered = {}
+    walk_root_files = []
+    if os.path.isfile(path):
+        dirname = os.path.dirname(path)
+        basename = os.path.basename(path)
+        walk_root_files = [(dirname, None, [basename])]
+    else:
+        walk_root_files = os.walk(path)
+
+    for root, _, files in walk_root_files:
+        for f in files:
+            if f.startswith("."):
+                logger.debug("render_jinja2: ignoring file %s", f)
+                continue
+            render_path = os.path.join(root, f)
+            logger.debug("render_jinja2 rendering %s", render_path)
+            # get subpath and filename, strip any leading/trailing /
+            name = render_path[len(os.path.commonprefix([root, path])) :].strip("/")
+            try:
+                rendered[name] = {
+                    "content": render_jinja2_file(
+                        render_path, context, jinja2_filters=jinja2_filters, search_paths=search_paths
+                    ),
+                    "mode": file_mode(render_path),
+                }
+            except Exception as e:
+                raise CompileError(f"Jinja2 error: failed to render {render_path}: {e}")
+
+    return rendered
+
+
+def file_mode(name):
+    """Returns mode for file name"""
+    st = os.stat(name)
+    return stat.S_IMODE(st.st_mode)

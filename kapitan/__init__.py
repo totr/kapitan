@@ -5,9 +5,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import os
 import sys
-import logging
 
 
 def setup_logging(name=None, level=logging.INFO, force=False):
@@ -33,6 +33,3 @@ if "-v" in sys.argv or "--verbose" in sys.argv:
     setup_logging(level=logging.DEBUG)
 else:
     setup_logging()
-
-# Adding reclass to PYTHONPATH
-sys.path.insert(0, os.path.dirname(__file__) + "/reclass")

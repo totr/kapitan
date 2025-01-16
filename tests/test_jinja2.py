@@ -6,18 +6,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 "jinja2 tests"
-
+import argparse
 import base64
-import unittest
 import tempfile
 import time
-from kapitan.utils import render_jinja2_file
-from kapitan.resources import inventory
-from kapitan.inputs.jinja2_filters import base64_encode
+import unittest
+
+from kapitan import cached
+from kapitan.jinja2_filters import base64_encode
 from kapitan.refs.base import RefController, Revealer
 from kapitan.refs.base64 import Base64Ref
-from kapitan import cached
-from collections import namedtuple
+from kapitan.resources import inventory
+from kapitan.utils import render_jinja2_file
 
 
 class Jinja2FiltersTest(unittest.TestCase):
@@ -150,14 +150,9 @@ class Jinja2FiltersTest(unittest.TestCase):
             f.write("{{ my_ref_tag_var|reveal_maybe|b64encode }}".encode("UTF-8"))
             f.seek(0)
 
-            # new argparse namespace with --reveal and --refs-path values
-            namespace = namedtuple("Namespace", [])
-            namespace.reveal = True
-            namespace.refs_path = tempfile.mkdtemp()
-
             # reveal_maybe uses cached, so inject namespace
-            cached.args["compile"] = namespace
-            cached.ref_controller_obj = RefController(cached.args["compile"].refs_path)
+            cached.args = argparse.Namespace(reveal=True, refs_path=tempfile.mkdtemp())
+            cached.ref_controller_obj = RefController(cached.args.refs_path)
             cached.revealer_obj = Revealer(cached.ref_controller_obj)
 
             ref_tag = "?{base64:some_value}"
@@ -175,14 +170,9 @@ class Jinja2FiltersTest(unittest.TestCase):
             f.write("{{ my_ref_tag_var|reveal_maybe }}".encode("UTF-8"))
             f.seek(0)
 
-            # new argparse namespace with --reveal and --refs-path values
-            namespace = namedtuple("Namespace", [])
-            namespace.reveal = False
-            namespace.refs_path = tempfile.mkdtemp()
-
             # reveal_maybe uses cached, so inject namespace
-            cached.args["compile"] = namespace
-            cached.ref_controller_obj = RefController(cached.args["compile"].refs_path)
+            cached.args = argparse.Namespace(reveal=False, refs_path=tempfile.mkdtemp())
+            cached.ref_controller_obj = RefController(cached.args.refs_path)
             cached.revealer_obj = Revealer(cached.ref_controller_obj)
 
             ref_tag = "?{base64:some_value}"
@@ -199,14 +189,9 @@ class Jinja2FiltersTest(unittest.TestCase):
             f.write("{{ my_var|reveal_maybe }}".encode("UTF-8"))
             f.seek(0)
 
-            # new argparse namespace with --reveal and --refs-path values
-            namespace = namedtuple("Namespace", [])
-            namespace.reveal = True
-            namespace.refs_path = tempfile.mkdtemp()
-
             # reveal_maybe uses cached, so inject namespace
-            cached.args["compile"] = namespace
-            cached.ref_controller_obj = RefController(cached.args["compile"].refs_path)
+            cached.args = argparse.Namespace(reveal=True, refs_path=tempfile.mkdtemp())
+            cached.ref_controller_obj = RefController(cached.args.refs_path)
             cached.revealer_obj = Revealer(cached.ref_controller_obj)
 
             var_value = "heavy_rock!"
